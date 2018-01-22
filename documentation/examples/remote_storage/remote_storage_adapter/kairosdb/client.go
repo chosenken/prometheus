@@ -4,8 +4,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/chosenken/go-kairosdb/builder"
-	"github.com/chosenken/go-kairosdb/client"
+	"github.com/ajityagaty/go-kairosdb/builder"
+	"github.com/ajityagaty/go-kairosdb/client"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 
@@ -24,6 +24,9 @@ type Client struct {
 // NewClient creates a new Client.
 func NewClient(logger log.Logger, apiURL string) *Client {
 	c := client.NewHttpClient(apiURL)
+	if logger == nil {
+		logger = log.NewNopLogger()
+	}
 	return &Client{
 		logger: logger,
 		client: c,
@@ -49,8 +52,21 @@ func tagsFromMetric(m model.Metric) map[string]string {
 
 // Write sends a batch of samples to KairosDB via its HTTP API.
 func (c *Client) Write(samples model.Samples) error {
-	mb := builder.NewMetricBuilder()
+	mb := c.BuildMetrics(samples)
+	resp, err := c.client.PushMetrics(mb)
+	if resp != nil {
+		level.Error(c.logger).Log("status code", resp.GetStatusCode())
+		for _, e := range resp.GetErrors() {
+			level.Error(c.logger).Log("err", e)
+		}
+	}
 
+	return err
+}
+
+// BuildMetrics build the KairosDB Library Metric Builder which holds the metric in a KairosDB format.
+func (c *Client) BuildMetrics(samples model.Samples) builder.MetricBuilder {
+	mb := builder.NewMetricBuilder()
 	for _, s := range samples {
 		v := float64(s.Value)
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -58,7 +74,7 @@ func (c *Client) Write(samples model.Samples) error {
 			c.ignoredSamples.Inc()
 			continue
 		}
-		metric := builder.NewMetric(string(s.Metric[model.MetricNameLabel]))
+		metric := mb.AddMetric(string(s.Metric[model.MetricNameLabel]))
 		// KairosDB timestamps are in milliseconds
 		metric.AddDataPoint(s.Timestamp.UnixNano()/int64(time.Millisecond), v)
 		tags := tagsFromMetric(s.Metric)
@@ -68,17 +84,8 @@ func (c *Client) Write(samples model.Samples) error {
 				metric.AddTag(name, value)
 			}
 		}
-		mb.AddBuiltMetric(metric)
 	}
-	resp, err := c.client.PushMetrics(mb)
-	if len(resp.GetErrors()) != 0 {
-		level.Error(c.logger).Log("status code", resp.GetStatusCode())
-		for _, e := range resp.GetErrors() {
-			level.Error(c.logger).Log("err", e)
-		}
-	}
-
-	return err
+	return mb
 }
 
 // Name identifies the client as a KairosDB Client.
